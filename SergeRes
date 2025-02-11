@@ -1,0 +1,160 @@
+#include <Bela.h>
+#include <libraries/Midi/Midi.h>
+#include <libraries/Gui/Gui.h>
+#include <libraries/GuiController/GuiController.h>
+#include <cmath>
+#include <vector>
+
+struct BiquadFilter {
+    float b0, b1, b2, a1, a2;
+    float z1, z2;
+
+    void setup(float sampleRate, float resonance, float R1, float R2, float R3, float R4, float R5, float R6,
+               float C1, float C2, float C3, float C4) {
+        float T = 1.0f / sampleRate;
+        float K = 2.0f / T; // Bilinear transform factor
+
+        // Adjust resistances or capacitances based on resonance
+        R3 *= resonance;
+        R4 *= resonance;
+        R6 *= resonance;
+
+        // Stage 1 coefficients (discretized from H1(s))
+        float a0 = C1 * C2 * R1 * R2 * R3;
+        float a1 = C1 * R3 + C2 * R3;
+        float a2 = 1;
+        float b0 = -C1 / R1;
+
+        float A0 = a2 * K * K + a1 * K + a0;
+        this->b0 = (b0 * K * K) / A0;
+        this->b1 = (2 * b0 * K * K) / A0;
+        this->b2 = (b0 * K * K) / A0;
+        this->a1 = (2 * a0 - 2 * a2 * K * K) / A0;
+        this->a2 = (a2 * K * K - a1 * K + a0) / A0;
+
+        // Stage 2 coefficients (discretized from H2(s))
+        float b0_2 = -1 / (C3 * R4);
+        this->b0 += b0_2;
+
+        // Stage 3 coefficients (discretized from H3(s))
+        float b0_3 = -R6 / (R5 * C4 * R6 + 1);
+        this->b0 += b0_3;
+
+        z1 = z2 = 0.0f;
+    }
+
+    float process(float x) {
+        float y = b0 * x + b1 * z1 + b2 * z2 - a1 * z1 - a2 * z2;
+        z2 = z1;
+        z1 = y;
+        return y;
+    }
+};
+
+constexpr int NUM_BANDS = 14;
+constexpr float MAX_GAIN = 127.0f;
+constexpr float MIN_GAIN = 0.0f;
+constexpr float TRANSITION_SPEED = 0.05f;
+constexpr float Q = 0.01f;
+constexpr float R = 0.1f;
+
+std::vector<float> bandGains(NUM_BANDS, 63.5f);
+std::vector<float> currentGains(NUM_BANDS, 63.5f);
+std::vector<float> kalmanEstimates(NUM_BANDS, 0.0f);
+std::vector<float> kalmanErrors(NUM_BANDS, 1.0f);
+std::vector<BiquadFilter> filters(NUM_BANDS);
+float resonance = 0.0f;
+float volume = 1.0f;
+
+Gui gui;
+GuiController controller;
+std::vector<unsigned int> sliderIndices(NUM_BANDS + 2);
+Midi midi;
+
+const char* gMidiPort0 = "hw:1,0,0";
+
+float clampValue(float value, float minVal, float maxVal) {
+    return std::max(minVal, std::min(value, maxVal));
+}
+
+float applyKalmanFilter(float measurement, int bandIndex) {
+    float& estimate = kalmanEstimates[bandIndex];
+    float& error = kalmanErrors[bandIndex];
+
+    float kalmanGain = error / (error + R);
+    estimate = estimate + kalmanGain * (measurement - estimate);
+    error = (1 - kalmanGain) * error;
+    error += Q;
+
+    return estimate;
+}
+
+void midiMessageCallback(MidiChannelMessage message, void* arg) {
+    if (message.getType() == kmmControlChange) {
+        int channel = message.getChannel();
+        int value = message.getDataByte(1);
+
+        if (channel < NUM_BANDS) {
+            float gain = clampValue(value, MIN_GAIN, MAX_GAIN);
+            bandGains[channel] = applyKalmanFilter(gain, channel);
+            controller.setSliderValue(sliderIndices[channel], bandGains[channel]);
+        } else if (channel == NUM_BANDS) {
+            volume = clampValue(value / MAX_GAIN, 0.0f, 1.0f);
+            controller.setSliderValue(sliderIndices[NUM_BANDS], volume * MAX_GAIN);
+        } else if (channel == NUM_BANDS + 1) {
+            resonance = clampValue(value / MAX_GAIN, 0.1f, 10.0f);
+            controller.setSliderValue(sliderIndices[NUM_BANDS + 1], resonance * MAX_GAIN);
+        }
+    }
+}
+
+bool setup(BelaContext *context, void *userData) {
+    gui.setup(context->projectName);
+    controller.setup(&gui, "Filter Bank Controls");
+
+    float sampleRate = context->audioSampleRate;
+    std::vector<float> sergeFrequencies = {16000.0f, 8000.0f, 5120.0f, 4000.0f, 2560.0f, 2000.0f, 1280.0f, 1000.0f, 640.0f, 500.0f, 320.0f, 250.0f, 125.0f, 62.5f};
+
+    float R1 = 39e3, R2 = 91e3, R3 = 510e3, R4 = 47e3, R5 = 47e3, R6 = 47e3;
+    float C1 = 47e-9, C2 = 47e-9, C3 = 4.7e-6, C4 = 47e-12;
+
+    for (int i = 0; i < NUM_BANDS; ++i) {
+        float freq = sergeFrequencies[i];
+        filters[i].setup(sampleRate, resonance, R1, R2, R3, R4, R5, R6, C1, C2, C3, C4);
+
+        sliderIndices[i] = controller.addSlider("Band " + std::to_string(NUM_BANDS - i) + " (" + std::to_string(static_cast<int>(freq)) + " Hz)",
+                                                bandGains[i], MIN_GAIN, MAX_GAIN, 1.0);
+    }
+
+    sliderIndices[NUM_BANDS] = controller.addSlider("Volume", volume * MAX_GAIN, MIN_GAIN, MAX_GAIN, 1.0);
+    sliderIndices[NUM_BANDS + 1] = controller.addSlider("Resonance", resonance * MAX_GAIN, MIN_GAIN, MAX_GAIN, 1.0);
+
+    midi.readFrom(gMidiPort0);
+    midi.writeTo(gMidiPort0);
+    midi.enableParser(true);
+    midi.getParser()->setCallback(midiMessageCallback, nullptr);
+
+    return true;
+}
+
+void render(BelaContext *context, void *userData) {
+    for (unsigned int n = 0; n < context->audioFrames; ++n) {
+        float in = audioRead(context, n, 0);
+        float out = 0.0f;
+
+        for (int i = 0; i < NUM_BANDS; ++i) {
+            float targetGain = bandGains[i];
+            currentGains[i] += TRANSITION_SPEED * (targetGain - currentGains[i]);
+
+            float gain = currentGains[i] / MAX_GAIN;
+            out += filters[i].process(in) * gain;
+        }
+
+        out = clampValue(out * volume, -1.0f, 1.0f);
+
+        audioWrite(context, n, 0, out);
+        audioWrite(context, n, 1, out);
+    }
+}
+
+void cleanup(BelaContext *context, void *userData) {}
