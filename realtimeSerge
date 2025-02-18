@@ -79,6 +79,9 @@ bool setup(BelaContext *context, void *userData) {
 
 void render(BelaContext *context, void *userData) {
     resonance = controller.getSliderValue(sliderIndices[NUM_BANDS + 1]) / MAX_GAIN;
+    for (int i = 0; i < NUM_BANDS; ++i) {
+        bandGains[i] = controller.getSliderValue(sliderIndices[i]);
+    }
     for (unsigned int n = 0; n < context->audioFrames; ++n) {
         float inL = clampValue(audioRead(context, n, 0) * micGain, -1.0f, 1.0f);
         float inR = clampValue(audioRead(context, n, 1) * micGain, -1.0f, 1.0f);
