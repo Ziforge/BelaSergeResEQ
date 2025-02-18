@@ -5,31 +5,39 @@
 #include <cmath>
 #include <vector>
 
-// Declare the MIDI callback function before use
+// Declare MIDI callback before use
 void midiMessageCallback(MidiChannelMessage message, void* arg);
 
 struct BiquadFilter {
     float b0, b1, b2, a1, a2;
     float z1, z2;
 
-    void setup(float sampleRate, float cutoffFreq, float resonance) {
+    void setup(float sampleRate, float cutoffFreq, float resonanceFactor) {
+        float Q = 1.0f + (resonanceFactor * 2.5f); // Scaled resonance for stability
+
         float T = 1.0f / sampleRate;
         float omega = 2.0f * M_PI * cutoffFreq * T;
-        float alpha = sin(omega) / (0.25f * resonance);
+        float alpha = sin(omega) / (2.0f * Q);
         float cosw = cos(omega);
 
         float a0 = 1.0f + alpha;
-        this->b0 = (1.0f - cosw) / 2.0f / a0;
-        this->b1 = (1.0f - cosw) / a0;
-        this->b2 = (1.0f - cosw) / 2.0f / a0;
-        this->a1 = (-2.0f * cosw) / a0;
-        this->a2 = (1.0f - alpha) / a0;
+        b0 = (1.0f - cosw) / 2.0f / a0;
+        b1 = (1.0f - cosw) / a0;
+        b2 = (1.0f - cosw) / 2.0f / a0;
+        a1 = (-2.0f * cosw) / a0;
+        a2 = (1.0f - alpha) / a0;
 
         z1 = z2 = 0.0f;
     }
 
-    float process(float x) {
+    float process(float x, float gain, float resonanceFactor, float maxGain) {
+        float resonanceBoost = (gain * maxGain > 102.0f) ? (resonanceFactor * 0.5f) : 1.0f; // Soft resonance curve
+
         float y = b0 * x + b1 * z1 + b2 * z2 - a1 * z1 - a2 * z2;
+        y *= resonanceBoost; // Apply mild saturation
+
+        y = tanh(y * 0.8f); // Soft clipping prevents harsh distortion
+
         z2 = z1;
         z1 = y;
         return y;
@@ -44,10 +52,10 @@ constexpr float TRANSITION_SPEED = 0.05f;
 std::vector<float> bandGains(NUM_BANDS, 63.5f);
 std::vector<float> currentGains(NUM_BANDS, 63.5f);
 std::vector<BiquadFilter> filters(NUM_BANDS);
-float resonance = 0.7f;
+float resonance = 1.0f;
 float volume = 1.0f;
-float micGain = 4.0f;
-float headphoneGain = 4.0f;
+float micGain = 2.0f;
+float headphoneGain = 2.0f;
 
 Gui gui;
 GuiController controller;
@@ -82,7 +90,7 @@ bool setup(BelaContext *context, void *userData) {
 }
 
 void render(BelaContext *context, void *userData) {
-    resonance = 0.1f + (controller.getSliderValue(sliderIndices[NUM_BANDS + 1]) / MAX_GAIN) * 1.9f;
+    resonance = 1.0f + (controller.getSliderValue(sliderIndices[NUM_BANDS + 1]) / MAX_GAIN) * 1.5f;
     volume = controller.getSliderValue(sliderIndices[NUM_BANDS]) / MAX_GAIN;
 
     for (int i = 0; i < NUM_BANDS; ++i) {
@@ -99,8 +107,12 @@ void render(BelaContext *context, void *userData) {
             float targetGain = bandGains[i];
             currentGains[i] += TRANSITION_SPEED * (targetGain - currentGains[i]);
             float gain = currentGains[i] / MAX_GAIN;
-            outL += filters[i].process(inL) * gain;
-            outR += filters[i].process(inR) * gain;
+
+            // Resonance engages when gain exceeds 80%
+            float effectiveResonance = (gain * MAX_GAIN > 102.0f) ? resonance : 1.0f;
+            
+            outL += filters[i].process(inL, gain * MAX_GAIN, effectiveResonance, MAX_GAIN) * gain;
+            outR += filters[i].process(inR, gain * MAX_GAIN, effectiveResonance, MAX_GAIN) * gain;
         }
 
         outL = clampValue(outL * volume * headphoneGain, -1.0f, 1.0f);
@@ -124,11 +136,12 @@ void midiMessageCallback(MidiChannelMessage message, void* arg) {
             volume = clampValue(value / MAX_GAIN, 0.0f, 1.0f);
             controller.setSliderValue(sliderIndices[NUM_BANDS], volume * MAX_GAIN);
         } else if (ccNumber == NUM_BANDS + 1) { // CC 16 -> Resonance
-            resonance = 0.1f + (value / MAX_GAIN) * 1.9f;
+            resonance = 1.0f + (value / MAX_GAIN) * 1.5f;
             controller.setSliderValue(sliderIndices[NUM_BANDS + 1], resonance * MAX_GAIN);
         }
     }
 }
 
 void cleanup(BelaContext *context, void *userData) {}
+
 
