@@ -78,7 +78,7 @@ bool setup(BelaContext *context, void *userData) {
 }
 
 void render(BelaContext *context, void *userData) {
-    resonance = controller.getSliderValue(sliderIndices[NUM_BANDS + 1]) / MAX_GAIN;
+    resonance = 0.1f + (controller.getSliderValue(sliderIndices[NUM_BANDS + 1]) / MAX_GAIN) * 1.9f;
     for (int i = 0; i < NUM_BANDS; ++i) {
         bandGains[i] = controller.getSliderValue(sliderIndices[i]);
     }
