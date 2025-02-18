@@ -12,7 +12,7 @@ struct BiquadFilter {
     void setup(float sampleRate, float cutoffFreq, float resonance) {
         float T = 1.0f / sampleRate;
         float omega = 2.0f * M_PI * cutoffFreq * T;
-        float alpha = sin(omega) / (2.0f * resonance);
+        float alpha = sin(omega) / (0.25f * resonance);
         float cosw = cos(omega);
 
         float a0 = 1.0f + alpha;
@@ -43,8 +43,8 @@ std::vector<float> currentGains(NUM_BANDS, 63.5f);
 std::vector<BiquadFilter> filters(NUM_BANDS);
 float resonance = 0.7f;
 float volume = 1.0f;
-float micGain = 2.0f;
-float headphoneGain = 2.0f;
+float micGain = 4.0f;
+float headphoneGain = 4.0f;
 
 Gui gui;
 GuiController controller;
@@ -55,6 +55,25 @@ const char* gMidiPort0 = "hw:1,0,0";
 
 float clampValue(float value, float minVal, float maxVal) {
     return std::max(minVal, std::min(value, maxVal));
+}
+
+void midiMessageCallback(MidiChannelMessage message, void* arg) {
+    if (message.getType() == kmmControlChange) {
+        int channel = 1; // Force all MIDI messages to channel 1
+        int value = message.getDataByte(1);
+
+        int ccNumber = message.getDataByte(0);
+        if (ccNumber < NUM_BANDS) {
+            bandGains[ccNumber] = clampValue(value, MIN_GAIN, MAX_GAIN);
+            controller.setSliderValue(sliderIndices[ccNumber], bandGains[ccNumber]);
+        } else if (channel == NUM_BANDS) {
+            volume = clampValue(value / MAX_GAIN, 0.0f, 1.0f);
+            controller.setSliderValue(sliderIndices[NUM_BANDS], volume * MAX_GAIN);
+        } else if (channel == NUM_BANDS + 1) {
+            resonance = 0.1f + (value / MAX_GAIN) * 1.9f;
+            controller.setSliderValue(sliderIndices[NUM_BANDS + 1], resonance * MAX_GAIN);
+        }
+    }
 }
 
 bool setup(BelaContext *context, void *userData) {
@@ -74,6 +93,7 @@ bool setup(BelaContext *context, void *userData) {
     midi.readFrom(gMidiPort0);
     midi.writeTo(gMidiPort0);
     midi.enableParser(true);
+    midi.getParser()->setCallback(midiMessageCallback, nullptr);
     return true;
 }
 
@@ -104,3 +124,5 @@ void render(BelaContext *context, void *userData) {
 }
 
 void cleanup(BelaContext *context, void *userData) {}
+
+
