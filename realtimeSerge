@@ -1,0 +1,103 @@
+#include <Bela.h>
+#include <libraries/Midi/Midi.h>
+#include <libraries/Gui/Gui.h>
+#include <libraries/GuiController/GuiController.h>
+#include <cmath>
+#include <vector>
+
+struct BiquadFilter {
+    float b0, b1, b2, a1, a2;
+    float z1, z2;
+
+    void setup(float sampleRate, float cutoffFreq, float resonance) {
+        float T = 1.0f / sampleRate;
+        float omega = 2.0f * M_PI * cutoffFreq * T;
+        float alpha = sin(omega) / (2.0f * resonance);
+        float cosw = cos(omega);
+
+        float a0 = 1.0f + alpha;
+        this->b0 = (1.0f - cosw) / 2.0f / a0;
+        this->b1 = (1.0f - cosw) / a0;
+        this->b2 = (1.0f - cosw) / 2.0f / a0;
+        this->a1 = (-2.0f * cosw) / a0;
+        this->a2 = (1.0f - alpha) / a0;
+
+        z1 = z2 = 0.0f;
+    }
+
+    float process(float x) {
+        float y = b0 * x + b1 * z1 + b2 * z2 - a1 * z1 - a2 * z2;
+        z2 = z1;
+        z1 = y;
+        return y;
+    }
+};
+
+constexpr int NUM_BANDS = 14;
+constexpr float MAX_GAIN = 127.0f;
+constexpr float MIN_GAIN = 0.0f;
+constexpr float TRANSITION_SPEED = 0.05f;
+
+std::vector<float> bandGains(NUM_BANDS, 63.5f);
+std::vector<float> currentGains(NUM_BANDS, 63.5f);
+std::vector<BiquadFilter> filters(NUM_BANDS);
+float resonance = 0.7f;
+float volume = 1.0f;
+float micGain = 2.0f;
+float headphoneGain = 2.0f;
+
+Gui gui;
+GuiController controller;
+std::vector<unsigned int> sliderIndices(NUM_BANDS + 2);
+Midi midi;
+
+const char* gMidiPort0 = "hw:1,0,0";
+
+float clampValue(float value, float minVal, float maxVal) {
+    return std::max(minVal, std::min(value, maxVal));
+}
+
+bool setup(BelaContext *context, void *userData) {
+    gui.setup(context->projectName);
+    controller.setup(&gui, "Filter Bank Controls");
+    
+    std::vector<float> bandFrequencies = {16000.0f, 8000.0f, 5120.0f, 4000.0f, 2560.0f, 2000.0f, 1280.0f, 1000.0f, 640.0f, 500.0f, 320.0f, 250.0f, 125.0f, 62.5f};
+    
+    for (int i = 0; i < NUM_BANDS; ++i) {
+        filters[i].setup(context->audioSampleRate, bandFrequencies[i], resonance);
+        sliderIndices[i] = controller.addSlider("Band " + std::to_string(NUM_BANDS - i) + " (" + std::to_string(static_cast<int>(bandFrequencies[i])) + " Hz)", bandGains[i], MIN_GAIN, MAX_GAIN, 1.0);
+    }
+
+    sliderIndices[NUM_BANDS] = controller.addSlider("Volume", volume * MAX_GAIN, MIN_GAIN, MAX_GAIN, 1.0);
+    sliderIndices[NUM_BANDS + 1] = controller.addSlider("Resonance", resonance * MAX_GAIN, MIN_GAIN, MAX_GAIN, 1.0);
+
+    midi.readFrom(gMidiPort0);
+    midi.writeTo(gMidiPort0);
+    midi.enableParser(true);
+    return true;
+}
+
+void render(BelaContext *context, void *userData) {
+    resonance = controller.getSliderValue(sliderIndices[NUM_BANDS + 1]) / MAX_GAIN;
+    for (unsigned int n = 0; n < context->audioFrames; ++n) {
+        float inL = clampValue(audioRead(context, n, 0) * micGain, -1.0f, 1.0f);
+        float inR = clampValue(audioRead(context, n, 1) * micGain, -1.0f, 1.0f);
+        float outL = 0.0f;
+        float outR = 0.0f;
+
+        for (int i = 0; i < NUM_BANDS; ++i) {
+            float targetGain = bandGains[i];
+            currentGains[i] += TRANSITION_SPEED * (targetGain - currentGains[i]);
+            float gain = currentGains[i] / MAX_GAIN;
+            outL += filters[i].process(inL) * gain;
+            outR += filters[i].process(inR) * gain;
+        }
+        outL = clampValue(outL * volume * headphoneGain, -1.0f, 1.0f);
+        outR = clampValue(outR * volume * headphoneGain, -1.0f, 1.0f);
+
+        audioWrite(context, n, 0, outL);
+        audioWrite(context, n, 1, outR);
+    }
+}
+
+void cleanup(BelaContext *context, void *userData) {}
