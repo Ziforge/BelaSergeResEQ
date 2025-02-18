@@ -5,6 +5,9 @@
 #include <cmath>
 #include <vector>
 
+// Declare the MIDI callback function before use
+void midiMessageCallback(MidiChannelMessage message, void* arg);
+
 struct BiquadFilter {
     float b0, b1, b2, a1, a2;
     float z1, z2;
@@ -57,31 +60,12 @@ float clampValue(float value, float minVal, float maxVal) {
     return std::max(minVal, std::min(value, maxVal));
 }
 
-void midiMessageCallback(MidiChannelMessage message, void* arg) {
-    if (message.getType() == kmmControlChange) {
-        int ccNumber = message.getDataByte(0); // MIDI CC number (0-15 for 16n)
-        int value = message.getDataByte(1); // CC value (0-127)
-        
-        if (ccNumber < NUM_BANDS) {
-            float mappedValue = clampValue(value, MIN_GAIN, MAX_GAIN);
-            bandGains[ccNumber] = mappedValue;
-            controller.setSliderValue(sliderIndices[ccNumber], mappedValue);
-        } else if (ccNumber == NUM_BANDS) {
-            volume = clampValue(value / MAX_GAIN, 0.0f, 1.0f);
-            controller.setSliderValue(sliderIndices[NUM_BANDS], volume * MAX_GAIN);
-        } else if (ccNumber == NUM_BANDS + 1) {
-            resonance = 0.1f + (value / MAX_GAIN) * 1.9f;
-            controller.setSliderValue(sliderIndices[NUM_BANDS + 1], resonance * MAX_GAIN);
-        }
-    }
-}
-
 bool setup(BelaContext *context, void *userData) {
     gui.setup(context->projectName);
     controller.setup(&gui, "Filter Bank Controls");
-    
+
     std::vector<float> bandFrequencies = {16000.0f, 8000.0f, 5120.0f, 4000.0f, 2560.0f, 2000.0f, 1280.0f, 1000.0f, 640.0f, 500.0f, 320.0f, 250.0f, 125.0f, 62.5f};
-    
+
     for (int i = 0; i < NUM_BANDS; ++i) {
         filters[i].setup(context->audioSampleRate, bandFrequencies[i], resonance);
         sliderIndices[i] = controller.addSlider("Band " + std::to_string(NUM_BANDS - i) + " (" + std::to_string(static_cast<int>(bandFrequencies[i])) + " Hz)", bandGains[i], MIN_GAIN, MAX_GAIN, 1.0);
@@ -99,9 +83,12 @@ bool setup(BelaContext *context, void *userData) {
 
 void render(BelaContext *context, void *userData) {
     resonance = 0.1f + (controller.getSliderValue(sliderIndices[NUM_BANDS + 1]) / MAX_GAIN) * 1.9f;
+    volume = controller.getSliderValue(sliderIndices[NUM_BANDS]) / MAX_GAIN;
+
     for (int i = 0; i < NUM_BANDS; ++i) {
         bandGains[i] = controller.getSliderValue(sliderIndices[i]);
     }
+
     for (unsigned int n = 0; n < context->audioFrames; ++n) {
         float inL = clampValue(audioRead(context, n, 0) * micGain, -1.0f, 1.0f);
         float inR = clampValue(audioRead(context, n, 1) * micGain, -1.0f, 1.0f);
@@ -115,6 +102,7 @@ void render(BelaContext *context, void *userData) {
             outL += filters[i].process(inL) * gain;
             outR += filters[i].process(inR) * gain;
         }
+
         outL = clampValue(outL * volume * headphoneGain, -1.0f, 1.0f);
         outR = clampValue(outR * volume * headphoneGain, -1.0f, 1.0f);
 
@@ -123,4 +111,24 @@ void render(BelaContext *context, void *userData) {
     }
 }
 
+void midiMessageCallback(MidiChannelMessage message, void* arg) {
+    if (message.getType() == kmmControlChange) {
+        int ccNumber = message.getDataByte(0) - 1; // MIDI CCs start at 1-16, adjust to 0-based
+        int value = message.getDataByte(1); // CC value (0-127)
+
+        if (ccNumber >= 0 && ccNumber < NUM_BANDS) {
+            float mappedValue = clampValue(value, MIN_GAIN, MAX_GAIN);
+            bandGains[ccNumber] = mappedValue;
+            controller.setSliderValue(sliderIndices[ccNumber], mappedValue);
+        } else if (ccNumber == NUM_BANDS) { // CC 15 -> Volume
+            volume = clampValue(value / MAX_GAIN, 0.0f, 1.0f);
+            controller.setSliderValue(sliderIndices[NUM_BANDS], volume * MAX_GAIN);
+        } else if (ccNumber == NUM_BANDS + 1) { // CC 16 -> Resonance
+            resonance = 0.1f + (value / MAX_GAIN) * 1.9f;
+            controller.setSliderValue(sliderIndices[NUM_BANDS + 1], resonance * MAX_GAIN);
+        }
+    }
+}
+
 void cleanup(BelaContext *context, void *userData) {}
+
