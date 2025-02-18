@@ -1,0 +1,55 @@
+#include <Bela.h>
+#include <libraries/Midi/Midi.h>
+#include <libraries/Gui/Gui.h>
+#include <libraries/GuiController/GuiController.h>
+#include <vector>
+#include <cmath>
+
+float volume = 1.0f;
+float micGain = 10.0f; // Digital gain multiplier
+float headphoneGain = 2.0f; // Headphone gain multiplier
+
+Gui gui;
+GuiController controller;
+std::vector<unsigned int> sliderIndices;
+Midi midi;
+
+const char* gMidiPort0 = "hw:1,0,0";
+
+float clampValue(float value, float minVal, float maxVal) {
+    return std::max(minVal, std::min(value, maxVal));
+}
+
+bool setup(BelaContext *context, void *userData) {
+    sliderIndices.push_back(controller.addSlider("Test Oscillator", 0, 0, 1, 1.0));
+    gui.setup(context->projectName);
+    controller.setup(&gui, "Audio Controls");
+    sliderIndices.push_back(controller.addSlider("Volume", volume * 127.0f, 0.0f, 127.0f, 1.0f));
+    midi.readFrom(gMidiPort0);
+    midi.writeTo(gMidiPort0);
+    midi.enableParser(true);
+    return true;
+}
+
+void render(BelaContext *context, void *userData) {
+    static float phase = 0.0f;
+    float testOsc = 0.0f;
+    bool oscEnabled = controller.getSliderValue(sliderIndices[0]) > 0.5f;
+    float frequency = 440.0f;
+    if (oscEnabled) {
+        testOsc = 0.2f * (2.0f * (phase / context->audioSampleRate) - 1.0f); // Sawtooth wave
+        phase += frequency;
+        if (phase >= context->audioSampleRate) phase -= context->audioSampleRate;
+    }
+    for (unsigned int n = 0; n < context->audioFrames; ++n) {
+        float inL = (audioRead(context, n, 0) * micGain) + testOsc;
+        float inR = (audioRead(context, n, 1) * micGain) + testOsc;
+        float outL = clampValue(inL * volume * headphoneGain, -1.0f, 1.0f);
+        float outR = clampValue(inR * volume * headphoneGain, -1.0f, 1.0f);
+
+        audioWrite(context, n, 0, outL);
+        audioWrite(context, n, 1, outR);
+    }
+}
+
+void cleanup(BelaContext *context, void *userData) {}
