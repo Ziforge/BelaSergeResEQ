@@ -144,4 +144,3 @@ void midiMessageCallback(MidiChannelMessage message, void* arg) {
 
 void cleanup(BelaContext *context, void *userData) {}
 
-
